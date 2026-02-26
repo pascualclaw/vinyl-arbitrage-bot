@@ -22,11 +22,8 @@ const WATCHLIST_PATH = path.join(DATA_DIR, 'watchlist.json');
 const DISCOGS_TOKEN = process.env.DISCOGS_TOKEN!;
 const BASE = 'https://api.discogs.com';
 
-// Only watch releases with median price above this threshold
-const MIN_WATCH_MEDIAN = 40; // USD
-
 // Pages to fetch per genre (100 results/page)
-// 8 pages × 100 results × 4 genres = up to 3,200 releases checked
+// 8 pages × 100 results × 4 genres = up to 3,200 releases watched
 const PAGES_PER_GENRE = 8;
 
 // Valid Discogs genres
@@ -36,9 +33,6 @@ export interface WatchlistEntry {
   releaseId: number;
   title: string;
   genre: string;
-  median: number;
-  lowestPrice: number | null;
-  numForSale: number;
 }
 
 export interface Watchlist {
@@ -84,20 +78,6 @@ async function fetchReleasePage(genre: string, page: number): Promise<{ id: numb
   });
   const data = await discogsGet(`/database/search?${params}`);
   return (data.results ?? []).map((r: any) => ({ id: Number(r.id), title: r.title ?? 'Unknown' }));
-}
-
-/** Fetch price stats for a release. Returns null if unavailable. */
-async function fetchPriceStats(releaseId: number): Promise<{ median: number; lowestPrice: number | null; numForSale: number } | null> {
-  try {
-    const data = await discogsGet(`/marketplace/stats/${releaseId}?curr_abbr=USD`);
-    const median = data.median?.value ? parseFloat(data.median.value) : null;
-    const lowest = data.lowest_price?.value ? parseFloat(data.lowest_price.value) : null;
-    const numForSale = data.num_for_sale ?? 0;
-    if (!median) return null;
-    return { median, lowestPrice: lowest, numForSale };
-  } catch {
-    return null;
-  }
 }
 
 /** Load existing watchlist from disk. */
@@ -146,20 +126,7 @@ export async function buildWatchlist(): Promise<Watchlist> {
       for (const release of releases) {
         if (seenIds.has(release.id)) continue;
         seenIds.add(release.id);
-
-        const stats = await fetchPriceStats(release.id);
-        await sleep(1_100);
-
-        if (!stats || stats.median < MIN_WATCH_MEDIAN) continue;
-
-        entries.push({
-          releaseId: release.id,
-          title: release.title,
-          genre,
-          median: stats.median,
-          lowestPrice: stats.lowestPrice,
-          numForSale: stats.numForSale,
-        });
+        entries.push({ releaseId: release.id, title: release.title, genre });
       }
 
       console.log(`[watchlist] ${genre} page ${page}/${PAGES_PER_GENRE} — ${entries.length} releases so far`);
@@ -168,8 +135,8 @@ export async function buildWatchlist(): Promise<Watchlist> {
     console.log(`[watchlist] ${genre} done — scanned ${pageCount} pages`);
   }
 
-  // Sort by median descending (biggest flips first)
-  entries.sort((a, b) => b.median - a.median);
+  // Sort by genre then title for consistent ordering
+  entries.sort((a, b) => a.genre.localeCompare(b.genre) || a.title.localeCompare(b.title));
 
   const watchlist: Watchlist = {
     builtAt: new Date().toISOString(),
