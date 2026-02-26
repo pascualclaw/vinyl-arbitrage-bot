@@ -1,21 +1,24 @@
 /**
  * Discogs marketplace source.
  *
- * Strategy: search the Discogs DATABASE for popular releases in target genres
- * (sorted by "most collected" = liquid market), then check each release's
- * current marketplace listings for cheap copies.
- *
- * processListing() in index.ts handles the spread/threshold checks.
+ * Reads from data/watchlist.json (built by watchlist/builder.ts).
+ * For each release in the watchlist, checks current marketplace listings
+ * for cheap copies. processListing() in index.ts handles spread/threshold.
  */
 
 import { VinylListing } from '../types.js';
+import { loadWatchlist } from '../watchlist/builder.js';
 
 const DISCOGS_TOKEN = process.env.DISCOGS_TOKEN!;
 const MIN_LISTING_PRICE = parseFloat(process.env.MIN_LISTING_PRICE ?? '25');
 const BASE = 'https://api.discogs.com';
 
-const TARGET_GENRES = ['Jazz', 'Hip Hop', 'Rock', 'Funk / Soul'];
-const RELEASES_PER_GENRE = 12;
+// How many releases to check per poll cycle (rotate through the watchlist)
+// Full watchlist might be 1000+ releases — don't check all every 25min
+// Instead check a rotating window so every release gets checked ~every few hours
+const RELEASES_PER_CYCLE = 150;
+
+let watchlistOffset = 0;
 
 function sleep(ms: number) {
   return new Promise(r => setTimeout(r, ms));
@@ -25,42 +28,23 @@ async function discogsGet(path: string): Promise<any> {
   const url = path.startsWith('http') ? path : `${BASE}${path}`;
   const res = await fetch(url, {
     headers: {
-      'Authorization': `Discogs token=${DISCOGS_TOKEN}`,
+      Authorization: `Discogs token=${DISCOGS_TOKEN}`,
       'User-Agent': 'VinylArbitrageBot/1.0 +https://github.com/pascualclaw/vinyl-arbitrage-bot',
     },
   });
-
   if (res.status === 429) {
     console.warn('[discogs-market] Rate limited — waiting 12s');
     await sleep(12_000);
     return discogsGet(path);
   }
-
   if (!res.ok) {
     const body = await res.text();
     throw new Error(`Discogs API ${res.status}: ${body.slice(0, 120)}`);
   }
-
   return res.json();
 }
 
-/** Search DB for popular releases in a genre. Returns release IDs. */
-async function getPopularReleaseIds(genre: string): Promise<number[]> {
-  const params = new URLSearchParams({
-    genre,
-    format: 'Vinyl',
-    type: 'release',
-    sort: 'have',
-    sort_order: 'desc',
-    per_page: String(RELEASES_PER_GENRE),
-    page: '1',
-  });
-
-  const data = await discogsGet(`/database/search?${params}`);
-  return (data.results ?? []).map((r: any) => Number(r.id)).filter(Boolean);
-}
-
-/** Get current marketplace listings for a release, US sellers only, sorted by price. */
+/** Get current cheap marketplace listings for a release (US sellers, sorted by price asc). */
 async function getListingsForRelease(releaseId: number): Promise<VinylListing[]> {
   const params = new URLSearchParams({
     status: 'For Sale',
@@ -79,8 +63,8 @@ async function getListingsForRelease(releaseId: number): Promise<VinylListing[]>
     const price = parseFloat(l.price?.value ?? '0');
     const shipping = parseFloat(l.shipping_price?.value ?? '5');
     const totalCost = price + shipping;
-    const feedbackRaw = l.seller?.stats?.rating;
-    const feedbackPct = feedbackRaw ? parseFloat(feedbackRaw) * 100 : 0;
+    const feedbackRaw = parseFloat(l.seller?.stats?.rating ?? '0');
+    const feedbackPct = feedbackRaw * 100;
 
     if (price < MIN_LISTING_PRICE) continue;
     if (feedbackPct < 95) continue;
@@ -102,43 +86,51 @@ async function getListingsForRelease(releaseId: number): Promise<VinylListing[]>
       sellerFeedbackPercent: feedbackPct,
       sellerFeedbackCount: l.seller?.stats?.total ?? 0,
       releaseId: String(releaseId),
-      genre: TARGET_GENRES[0], // will be overwritten per genre loop
     });
   }
 
   return results;
 }
 
-/** Main poll: find cheap Discogs listings across target genres. */
+/**
+ * Poll a rotating window of the watchlist for underpriced listings.
+ * Each poll cycle covers RELEASES_PER_CYCLE releases, rotating through the full list.
+ */
 export async function pollDiscogs(): Promise<VinylListing[]> {
-  const results: VinylListing[] = [];
-  const seenListingIds = new Set<string>();
+  const watchlist = loadWatchlist();
 
-  for (const genre of TARGET_GENRES) {
+  if (!watchlist || watchlist.releases.length === 0) {
+    console.log('[discogs-market] No watchlist yet — skipping (build in progress)');
+    return [];
+  }
+
+  const total = watchlist.releases.length;
+  const slice = watchlist.releases.slice(watchlistOffset, watchlistOffset + RELEASES_PER_CYCLE);
+
+  // Advance offset for next cycle (wraps around)
+  watchlistOffset = (watchlistOffset + RELEASES_PER_CYCLE) % total;
+
+  console.log(
+    `[discogs-market] Checking ${slice.length} releases ` +
+    `(offset ${watchlistOffset - slice.length < 0 ? total + watchlistOffset - slice.length : watchlistOffset - slice.length}/${total}, ` +
+    `full rotation every ~${Math.ceil(total / RELEASES_PER_CYCLE)} cycles)`
+  );
+
+  const results: VinylListing[] = [];
+
+  for (const entry of slice) {
     try {
-      const releaseIds = await getPopularReleaseIds(genre);
-      console.log(`[discogs-market] Genre "${genre}": scanning ${releaseIds.length} popular releases`);
+      const listings = await getListingsForRelease(entry.releaseId);
       await sleep(1_100);
 
-      for (const id of releaseIds) {
-        try {
-          const listings = await getListingsForRelease(id);
-          await sleep(1_100);
-
-          for (const l of listings) {
-            if (seenListingIds.has(l.listingId)) continue;
-            seenListingIds.add(l.listingId);
-            results.push({ ...l, genre });
-          }
-        } catch {
-          // non-fatal — skip this release
-        }
+      for (const l of listings) {
+        results.push({ ...l, genre: entry.genre });
       }
-    } catch (err) {
-      console.error(`[discogs-market] Error scanning genre "${genre}":`, err);
+    } catch {
+      // non-fatal
     }
   }
 
-  console.log(`[discogs-market] ${results.length} candidate listings before spread filter`);
+  console.log(`[discogs-market] ${results.length} candidate listings from this cycle`);
   return results;
 }

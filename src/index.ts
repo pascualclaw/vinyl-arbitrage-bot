@@ -12,7 +12,23 @@ import { pollEbay } from './sources/ebay.js';
 import { pollDiscogs } from './sources/discogs-market.js';
 import { getReleasePrice } from './pricing/discogs-price.js';
 import { sendAlert } from './alert/sender.js';
+import { buildWatchlist, watchlistNeedsRebuild } from './watchlist/builder.js';
 import { VinylListing, AlertPayload } from './types.js';
+
+const WATCHLIST_REFRESH_MS = 24 * 60 * 60 * 1000; // 24 hours
+let watchlistBuilding = false;
+
+async function maybeRebuildWatchlist(): Promise<void> {
+  if (watchlistBuilding) return;
+  if (!watchlistNeedsRebuild()) return;
+
+  watchlistBuilding = true;
+  console.log('[main] Watchlist needs rebuild — starting background build...');
+  buildWatchlist()
+    .then(wl => console.log(`[main] Watchlist ready: ${wl.count} releases`))
+    .catch(err => console.error('[main] Watchlist build failed:', err))
+    .finally(() => { watchlistBuilding = false; });
+}
 
 const POLL_INTERVAL_MS = Number(process.env.POLL_INTERVAL_MS ?? 1_500_000); // 25 min
 const SPREAD_THRESHOLD = Number(process.env.SPREAD_THRESHOLD ?? 3.0);
@@ -126,6 +142,12 @@ async function main(): Promise<void> {
   console.log(`   Min Discogs sales: ${MIN_DISCOGS_SALES}`);
 
   initDb();
+
+  // Kick off watchlist build immediately (runs in background, non-blocking)
+  maybeRebuildWatchlist();
+
+  // Refresh watchlist every 24h
+  setInterval(maybeRebuildWatchlist, WATCHLIST_REFRESH_MS);
 
   // Run immediately on startup, then on interval
   await runPollCycle();
