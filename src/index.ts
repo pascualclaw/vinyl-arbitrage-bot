@@ -31,7 +31,8 @@ async function maybeRebuildWatchlist(): Promise<void> {
 }
 
 const POLL_INTERVAL_MS = Number(process.env.POLL_INTERVAL_MS ?? 1_500_000); // 25 min
-const SPREAD_THRESHOLD = Number(process.env.SPREAD_THRESHOLD ?? 3.0);
+const SPREAD_THRESHOLD = Number(process.env.SPREAD_THRESHOLD ?? 3.0);         // eBay threshold
+const DISCOGS_SPREAD_THRESHOLD = Number(process.env.DISCOGS_SPREAD_THRESHOLD ?? 2.0); // Discogs threshold
 const MIN_DISCOGS_SALES = Number(process.env.MIN_DISCOGS_SALES ?? 5);
 
 async function processListing(listing: VinylListing): Promise<void> {
@@ -64,13 +65,14 @@ async function processListing(listing: VinylListing): Promise<void> {
     return;
   }
 
-  // Spread calculation
+  // Spread calculation — use source-specific threshold
+  const threshold = source === 'discogs' ? DISCOGS_SPREAD_THRESHOLD : SPREAD_THRESHOLD;
   const spread = priceStats.median / listing.totalCost;
   const profit = priceStats.median - listing.totalCost;
 
-  if (spread < SPREAD_THRESHOLD) {
+  if (spread < threshold) {
     console.log(
-      `[main] ${source}:${listingId} spread ${spread.toFixed(2)}x < ${SPREAD_THRESHOLD}x threshold — skipping`
+      `[main] ${source}:${listingId} spread ${spread.toFixed(2)}x < ${threshold}x threshold — skipping`
     );
     return;
   }
