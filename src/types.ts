@@ -1,7 +1,7 @@
 // Shared TypeScript types for vinyl-arbitrage-bot
 
 export interface VinylListing {
-  source: 'ebay' | 'discogs';
+  source: 'ebay' | 'discogs' | 'mercari' | 'craigslist' | 'musicstack';
   listingId: string;
   url: string;
   title: string;

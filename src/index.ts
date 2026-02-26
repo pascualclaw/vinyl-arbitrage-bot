@@ -1,7 +1,7 @@
 /**
  * vinyl-arbitrage-bot — main scheduler
  *
- * Polls eBay and Discogs every POLL_INTERVAL_MS (default: 25min),
+ * Polls eBay, Mercari, Craigslist, and MusicStack every POLL_INTERVAL_MS (default: 25min),
  * checks for underpriced vinyl using Discogs price data,
  * and sends WhatsApp alerts via OpenClaw when deals are found.
  */
@@ -9,7 +9,9 @@
 import 'dotenv/config';
 import { initDb, hasSeen, markSeen, markAlerted, pruneOld } from './db/cache.js';
 import { pollEbay } from './sources/ebay.js';
-import { pollDiscogs } from './sources/discogs-market.js';
+import { pollMercari } from './sources/mercari.js';
+import { pollCraigslist } from './sources/craigslist.js';
+import { pollMusicStack } from './sources/musicstack.js';
 import { getReleasePrice } from './pricing/discogs-price.js';
 import { sendAlert } from './alert/sender.js';
 import { buildWatchlist, watchlistNeedsRebuild } from './watchlist/builder.js';
@@ -65,7 +67,7 @@ async function processListing(listing: VinylListing): Promise<void> {
     return;
   }
 
-  // Spread calculation — use source-specific threshold
+  // Spread calculation — use source-specific threshold (discogs marketplace is more informed)
   const threshold = source === 'discogs' ? DISCOGS_SPREAD_THRESHOLD : SPREAD_THRESHOLD;
   const spread = priceStats.median / listing.totalCost;
   const profit = priceStats.median - listing.totalCost;
@@ -101,23 +103,41 @@ async function runPollCycle(): Promise<void> {
   // Prune stale DB entries monthly
   pruneOld(30);
 
-  const [ebayListings, discogsListings] = await Promise.allSettled([
+  const [ebayResult, mercariResult, craigslistResult, musicstackResult] = await Promise.allSettled([
     pollEbay(),
-    pollDiscogs(),
+    pollMercari(),
+    pollCraigslist(),
+    pollMusicStack(),
   ]);
 
   const allListings: VinylListing[] = [];
 
-  if (ebayListings.status === 'fulfilled') {
-    allListings.push(...ebayListings.value);
+  if (ebayResult.status === 'fulfilled') {
+    console.log(`[main] eBay: ${ebayResult.value.length} listings`);
+    allListings.push(...ebayResult.value);
   } else {
-    console.error('[main] eBay poll failed:', ebayListings.reason);
+    console.error('[main] eBay poll failed:', ebayResult.reason);
   }
 
-  if (discogsListings.status === 'fulfilled') {
-    allListings.push(...discogsListings.value);
+  if (mercariResult.status === 'fulfilled') {
+    console.log(`[main] Mercari: ${mercariResult.value.length} listings`);
+    allListings.push(...mercariResult.value);
   } else {
-    console.error('[main] Discogs poll failed:', discogsListings.reason);
+    console.error('[main] Mercari poll failed:', mercariResult.reason);
+  }
+
+  if (craigslistResult.status === 'fulfilled') {
+    console.log(`[main] Craigslist: ${craigslistResult.value.length} listings`);
+    allListings.push(...craigslistResult.value);
+  } else {
+    console.error('[main] Craigslist poll failed:', craigslistResult.reason);
+  }
+
+  if (musicstackResult.status === 'fulfilled') {
+    console.log(`[main] MusicStack: ${musicstackResult.value.length} listings`);
+    allListings.push(...musicstackResult.value);
+  } else {
+    console.error('[main] MusicStack poll failed:', musicstackResult.reason);
   }
 
   console.log(`[main] Processing ${allListings.length} total listings...`);
@@ -139,6 +159,7 @@ async function runPollCycle(): Promise<void> {
 
 async function main(): Promise<void> {
   console.log('🎵 vinyl-arbitrage-bot starting up...');
+  console.log(`   Sources: eBay, Mercari, Craigslist RSS, MusicStack`);
   console.log(`   Poll interval: ${POLL_INTERVAL_MS / 60_000} minutes`);
   console.log(`   Spread threshold: ${SPREAD_THRESHOLD}x`);
   console.log(`   Min Discogs sales: ${MIN_DISCOGS_SALES}`);
