@@ -1,0 +1,30 @@
+version: '3.9'
+
+services:
+  vinyl-arbitrage-bot:
+    build: .
+    container_name: vinyl-arbitrage-bot
+    restart: unless-stopped
+
+    volumes:
+      # SQLite database persisted on host
+      - ./data:/app/data
+
+    env_file:
+      - .env
+
+    environment:
+      # Override gateway URL to reach Mac host from inside Docker
+      OPENCLAW_GATEWAY_URL: http://host.docker.internal:16862
+      OPENCLAW_GATEWAY_TOKEN: 832bb3640279ac11d7b4ed0f0293984186fdf355442180ab
+      DATA_DIR: /app/data
+
+    # On Linux, host.docker.internal needs this extra host entry
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
