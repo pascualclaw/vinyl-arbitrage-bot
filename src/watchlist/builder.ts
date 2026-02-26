@@ -98,6 +98,53 @@ export function watchlistNeedsRebuild(): boolean {
   return age > 24 * 60 * 60 * 1000;
 }
 
+/** Load manual artist list from data/manual-artists.json */
+function loadManualArtists(): string[] {
+  try {
+    const p = path.join(DATA_DIR, 'manual-artists.json');
+    if (!fs.existsSync(p)) return [];
+    const data = JSON.parse(fs.readFileSync(p, 'utf-8'));
+    return data.artists ?? [];
+  } catch {
+    return [];
+  }
+}
+
+/** Fetch all vinyl releases for a specific artist (all pages). */
+async function fetchArtistReleases(artist: string): Promise<{ id: number; title: string }[]> {
+  const results: { id: number; title: string }[] = [];
+  let page = 1;
+
+  while (true) {
+    const params = new URLSearchParams({
+      artist,
+      format: 'Vinyl',
+      type: 'release',
+      per_page: '100',
+      page: String(page),
+    });
+
+    try {
+      const data = await discogsGet(`/database/search?${params}`);
+      const items = data.results ?? [];
+      if (items.length === 0) break;
+
+      for (const r of items) {
+        results.push({ id: Number(r.id), title: r.title ?? 'Unknown' });
+      }
+
+      const totalPages = data.pagination?.pages ?? 1;
+      if (page >= totalPages || page >= 5) break; // cap at 5 pages per artist
+      page++;
+      await sleep(1_100);
+    } catch {
+      break;
+    }
+  }
+
+  return results;
+}
+
 /** Build the watchlist. Can take 20-40 minutes due to rate limits — run in background. */
 export async function buildWatchlist(): Promise<Watchlist> {
   console.log(`[watchlist] Starting build — scanning ${PAGES_PER_GENRE} pages × ${TARGET_GENRES.length} genres...`);
@@ -133,6 +180,22 @@ export async function buildWatchlist(): Promise<Watchlist> {
     }
 
     console.log(`[watchlist] ${genre} done — scanned ${pageCount} pages`);
+  }
+
+  // Manual artists — add ALL their releases regardless of genre
+  const manualArtists = loadManualArtists();
+  if (manualArtists.length > 0) {
+    console.log(`[watchlist] Scanning ${manualArtists.length} manual artists...`);
+    for (const artist of manualArtists) {
+      const releases = await fetchArtistReleases(artist);
+      console.log(`[watchlist] ${artist}: ${releases.length} releases found`);
+      for (const r of releases) {
+        if (seenIds.has(r.id)) continue;
+        seenIds.add(r.id);
+        entries.push({ releaseId: r.id, title: r.title, genre: 'manual' });
+      }
+      await sleep(1_100);
+    }
   }
 
   // Sort by genre then title for consistent ordering
